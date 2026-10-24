@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ADB Caller</title>
+  <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; background: #111827; color: #e5e7eb; }
+    body { max-width: 1100px; margin: auto; padding: 1rem; }
+    h1, h2, h3 { margin-top: 0; }
+    section { margin: 1.5rem 0; }
+    .panel, .device-card { background: #1f2937; border: 1px solid #374151; border-radius: .75rem; padding: 1rem; }
+    .devices { display: grid; grid-template-columns: repeat(auto-fit, minmax(310px, 1fr)); gap: 1rem; }
+    .card-head, .actions { display: flex; align-items: center; justify-content: space-between; gap: .75rem; }
+    form { display: flex; flex-wrap: wrap; gap: .75rem; align-items: end; }
+    label { display: grid; gap: .3rem; flex: 1; min-width: 180px; }
+    input, textarea, select, button { font: inherit; border-radius: .4rem; border: 1px solid #4b5563; padding: .6rem; }
+    input, textarea, select { color: #f9fafb; background: #111827; }
+    textarea { width: 100%; min-height: 7rem; box-sizing: border-box; }
+    button { cursor: pointer; border: 0; color: white; background: #2563eb; font-weight: 650; }
+    button.danger { background: #dc2626; }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    code { color: #93c5fd; overflow-wrap: anywhere; }
+    .status { border-radius: 999px; background: #4b5563; padding: .25rem .6rem; font-size: .8rem; }
+    .status.active { background: #15803d; }
+    .status.dialing, .status.ringing { background: #b45309; }
+    .result { min-height: 1.5rem; margin-top: .5rem; }
+    .success { color: #86efac; }
+    .error { color: #fca5a5; }
+    .empty { color: #9ca3af; }
+  </style>
+</head>
+<body>
+  <h1>ADB Caller</h1>
+
+  <section class="panel">
+    <h2>Cargar números</h2>
+    <form hx-post="/ui/numbers" hx-target="#global-result" hx-encoding="multipart/form-data">
+      <label style="flex-basis:100%">Pegar números (uno por línea)
+        <textarea name="numbers" placeholder="8090000001&#10;8090000002"></textarea>
+      </label>
+      <label>CSV (primera columna)
+        <input type="file" name="csv_file" accept=".csv,text/csv">
+      </label>
+      <label>Destino
+        <select name="target_serial" hx-get="/ui/device-options" hx-trigger="load, devicesChanged from:body" hx-swap="innerHTML">
+          <option value="">Repartir automáticamente</option>
+        </select>
+      </label>
+      <button type="submit">Asignar</button>
+    </form>
+  </section>
+
+  <section class="actions">
+    <button hx-post="/ui/conference-all" hx-target="#global-result">Iniciar conferencias con pendientes</button>
+    <button hx-post="/ui/call-all" hx-target="#global-result">Llamar 1 por celular</button>
+    <button class="danger" hx-post="/ui/hangup-all" hx-target="#global-result">Colgar todos</button>
+  </section>
+  <div id="global-result" class="result" aria-live="polite"></div>
+
+  <section id="devices" class="devices"
+           hx-get="/ui/devices"
+           hx-trigger="load, every 5s, devicesChanged from:body"
+           hx-swap="innerHTML">
+    <p class="empty">Buscando celulares…</p>
+  </section>
+
+  <script>
+    const events = new EventSource('/events');
+    events.onmessage = () => document.body.dispatchEvent(new Event('devicesChanged'));
+  </script>
+</body>
+</html>
