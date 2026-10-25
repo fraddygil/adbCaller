@@ -124,7 +124,7 @@ def test_pending_number_starts_background_conference(tmp_path: Path) -> None:
             conference_call_timeout=2,
         )  # type: ignore[arg-type]
         await manager.refresh_once()
-        manager.assign_numbers(["8095550101"], "ONE")
+        await manager.assign_numbers(["8095550101"], "ONE")
 
         total = await manager.start_conference("ONE")
         for _ in range(100):
@@ -167,13 +167,215 @@ def test_start_all_conferences_uses_each_devices_pending_numbers(tmp_path: Path)
             adb, controller, database, poll_interval=60, auto_merge=True
         )  # type: ignore[arg-type]
         await manager.refresh_once()
-        manager.assign_numbers(["8095550101", "8095550102"], "ONE")
-        manager.assign_numbers(["8095550103"], "TWO")
+        await manager.assign_numbers(["8095550101", "8095550102"], "ONE")
+        await manager.assign_numbers(["8095550103"], "TWO")
 
         results = await manager.start_all_conferences()
 
         assert results["ONE"] == {"ok": True, "total": 2}
         assert results["TWO"] == {"ok": True, "total": 1}
+        await manager.stop()
+
+    asyncio.run(scenario())
+
+
+def test_call_all_removes_number_from_persistent_queue(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        adb = FakeAdb([AdbDevice("ONE", "SM-A566B", AdbState.DEVICE)])
+        database = Database(tmp_path / "test.db")
+        await database.initialize()
+        controller = CallController(adb, database)  # type: ignore[arg-type]
+        manager = DeviceManager(adb, controller, database, poll_interval=60)  # type: ignore[arg-type]
+        await manager.refresh_once()
+        await manager.assign_numbers(["8095550101"], "ONE")
+
+        results = await manager.call_all()
+
+        assert results["ONE"]["ok"] is True
+        assert await database.load_queued_numbers("ONE") == []
+        await manager.stop()
+
+    asyncio.run(scenario())
+
+
+def test_hangup_cancels_conference_before_next_number(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        adb = FakeAdb([AdbDevice("ONE", "SM-A566B", AdbState.DEVICE)])
+        database = Database(tmp_path / "test.db")
+        await database.initialize()
+        controller = CallController(adb, database)  # type: ignore[arg-type]
+        manager = DeviceManager(
+            adb,
+            controller,
+            database,
+            poll_interval=60,
+            auto_merge=True,
+            conference_call_timeout=30,
+        )  # type: ignore[arg-type]
+        await manager.refresh_once()
+        await manager.assign_numbers(["8095550101", "8095550102"], "ONE")
+        await manager.start_conference("ONE")
+        for _ in range(100):
+            if any(command[1][:2] == ("am", "start") for command in adb.commands):
+                break
+            await asyncio.sleep(0.01)
+
+        await manager.hangup("ONE")
+        await asyncio.sleep(0.05)
+
+        dialed = [
+            command[-1]
+            for _, command in adb.commands
+            if command[:2] == ("am", "start")
+        ]
+        assert dialed == ["tel:8095550101"]
+        assert manager.snapshots()[0].conference_state is ConferenceState.CANCELLED
+        await manager.stop()
+
+    asyncio.run(scenario())
+
+
+def test_restart_recovers_paused_without_redialing_uncertain_number(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        path = tmp_path / "test.db"
+        adb = FakeAdb([AdbDevice("ONE", "SM-A566B", AdbState.DEVICE)])
+        database = Database(path)
+        await database.initialize()
+        controller = CallController(adb, database)  # type: ignore[arg-type]
+        manager = DeviceManager(
+            adb,
+            controller,
+            database,
+            poll_interval=60,
+            auto_merge=True,
+            conference_call_timeout=30,
+        )  # type: ignore[arg-type]
+        await manager.refresh_once()
+        await manager.assign_numbers(["8095550101", "8095550102"], "ONE")
+        await manager.start_conference("ONE")
+        for _ in range(100):
+            if any(command[1][:2] == ("am", "start") for command in adb.commands):
+                break
+            await asyncio.sleep(0.01)
+        await manager.stop()
+
+        recovered_adb = FakeAdb(
+            [AdbDevice("ONE", "SM-A566B", AdbState.DEVICE)]
+        )
+        recovered_controller = CallController(recovered_adb, database)  # type: ignore[arg-type]
+        recovered = DeviceManager(
+            recovered_adb,
+            recovered_controller,
+            database,
+            poll_interval=60,
+            auto_merge=True,
+            conference_call_timeout=30,
+        )  # type: ignore[arg-type]
+        await recovered.refresh_once()
+
+        snapshot = recovered.snapshots()[0]
+        assert snapshot.conference_state is ConferenceState.RECOVERED_PAUSED
+        assert recovered.pending_assignments() == {"ONE": ["8095550102"]}
+        try:
+            await recovered.call_all()
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("call-all no debe consumir una sesión recuperada")
+        assert not any(
+            command[1][:2] == ("am", "start")
+            for command in recovered_adb.commands
+        )
+
+        await recovered.resume_conference("ONE")
+        for _ in range(100):
+            if any(command[1][:2] == ("am", "start") for command in recovered_adb.commands):
+                break
+            await asyncio.sleep(0.01)
+        dialed = [
+            command[-1]
+            for _, command in recovered_adb.commands
+            if command[:2] == ("am", "start")
+        ]
+        assert dialed == ["tel:8095550102"]
+        await recovered.hangup("ONE")
+        await recovered.stop()
+
+    asyncio.run(scenario())
+
+
+def test_unanswered_numbers_are_skipped_until_queue_is_exhausted(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        adb = FakeAdb([AdbDevice("ONE", "SM-A566B", AdbState.DEVICE)])
+        database = Database(tmp_path / "test.db")
+        await database.initialize()
+        controller = CallController(adb, database)  # type: ignore[arg-type]
+        manager = DeviceManager(
+            adb,
+            controller,
+            database,
+            poll_interval=60,
+            auto_merge=True,
+            conference_call_timeout=0.05,
+        )  # type: ignore[arg-type]
+        await manager.refresh_once()
+        await manager.assign_numbers(["8095550101", "8095550102"], "ONE")
+        await manager.start_conference("ONE")
+        task = manager._devices["ONE"].conference_task
+        assert task is not None
+
+        await asyncio.wait_for(task, timeout=3)
+
+        dialed = [
+            command[-1]
+            for _, command in adb.commands
+            if command[:2] == ("am", "start")
+        ]
+        assert dialed == ["tel:8095550101", "tel:8095550102"]
+        assert manager.snapshots()[0].conference_state is ConferenceState.FAILED
+        await manager.stop()
+
+    asyncio.run(scenario())
+
+
+def test_disconnect_pauses_conference_until_device_reconnects(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        adb = FakeAdb([AdbDevice("ONE", "SM-A566B", AdbState.DEVICE)])
+        database = Database(tmp_path / "test.db")
+        await database.initialize()
+        controller = CallController(adb, database)  # type: ignore[arg-type]
+        manager = DeviceManager(
+            adb,
+            controller,
+            database,
+            poll_interval=60,
+            auto_merge=True,
+            conference_call_timeout=30,
+        )  # type: ignore[arg-type]
+        await manager.refresh_once()
+        await manager.assign_numbers(["8095550101", "8095550102"], "ONE")
+        await manager.start_conference("ONE")
+        for _ in range(100):
+            if any(command[1][:2] == ("am", "start") for command in adb.commands):
+                break
+            await asyncio.sleep(0.01)
+
+        adb.devices = []
+        await manager.refresh_once()
+        assert manager.snapshots()[0].conference_state is ConferenceState.WAITING_DEVICE
+
+        adb.devices = [AdbDevice("ONE", "SM-A566B", AdbState.DEVICE)]
+        await manager.refresh_once()
+        assert manager.snapshots()[0].conference_state is ConferenceState.RECOVERED_PAUSED
+
+        adb.devices = []
+        await manager.refresh_once()
+        await manager.cancel_recovered_conference("ONE")
+        assert manager.snapshots()[0].conference_state is ConferenceState.CANCELLED
         await manager.stop()
 
     asyncio.run(scenario())

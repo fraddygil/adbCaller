@@ -32,6 +32,21 @@ class ConferenceState(StrEnum):
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
     ENDED = "ENDED"
+    RECOVERED_PAUSED = "RECOVERED_PAUSED"
+    WAITING_DEVICE = "WAITING_DEVICE"
+
+
+class ParticipantState(StrEnum):
+    PENDING = "PENDING"
+    DIALING = "DIALING"
+    ACTIVE = "ACTIVE"
+    MERGED = "MERGED"
+    NO_ANSWER = "NO_ANSWER"
+    BUSY = "BUSY"
+    REJECTED = "REJECTED"
+    SKIPPED = "SKIPPED"
+    CANCELLED = "CANCELLED"
+    FAILED = "FAILED"
 
 
 @dataclass(frozen=True, slots=True)

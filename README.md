@@ -1,9 +1,9 @@
-# ADB Caller — Fases 1, 2 y conferencia en progreso
+# ADB Caller — llamadas y conferencias por ADB
 
 Control de llamadas y conferencias de uno o varios celulares Android conectados
 por USB. Incluye control ADB, colas independientes por dispositivo, API, eventos
-SSE, UI HTMX, registro SQLite, Altavoz automático y combinación automática de
-llamadas agregadas.
+SSE, UI HTMX, registro SQLite, ajustes operativos persistentes, Altavoz
+automático y combinación automática de llamadas agregadas.
 
 ## Arquitectura
 
@@ -70,21 +70,34 @@ Todos los dispositivos deben aparecer como `device`. Si aparece
 `offline`, reconecte el cable y ejecute `adb kill-server` seguido de
 `adb start-server`.
 
-Variables opcionales:
+Las variables de infraestructura se leen al iniciar:
 
 | Variable | Predeterminado | Uso |
 |---|---:|---|
 | `ADB_PATH` | `adb` | Ruta al ejecutable ADB |
 | `ADB_TIMEOUT` | `15` | Timeout por orden, segundos |
-| `POLL_INTERVAL` | `2.5` | Sondeo de dispositivos y llamadas |
 | `DATABASE_PATH` | `./adb_caller.db` | Base SQLite |
 | `LOG_DIR` | `./logs` | Un log por serial |
 | `HOST` / `PORT` | `127.0.0.1` / `8000` | Servidor web |
+
+Los ajustes operativos se editan en el panel y se guardan en SQLite:
+
+| Variable opcional de bloqueo | Predeterminado | Uso |
+|---|---:|---|
+| `POLL_INTERVAL` | `2.5` | Sondeo de dispositivos y llamadas |
 | `AUTO_SPEAKER` | `true` | Activa Altavoz cuando una llamada pasa a `ACTIVE` |
 | `AUTO_MERGE` | `true` | Combina una llamada agregada cuando pasa a `ACTIVE` |
-| `CONFERENCE_CALL_TIMEOUT` | `60` | Espera máxima para que conteste cada número |
+| `CONFERENCE_CALL_TIMEOUT` | `15` | Espera máxima para que conteste cada número |
 | `CONFERENCE_MERGE_TIMEOUT` | `30` | Espera máxima para combinar cada llamada |
 | `MAX_CONFERENCE_CALLS` | `4` | Números consumidos por conferencia y dispositivo |
+| `MERGE_ATTEMPTS` | `5` | Intentos de combinación automática |
+| `SKIP_FAILED_NUMBERS` | `true` | Omite fallidos y continúa con el siguiente |
+
+La precedencia es valor predeterminado, SQLite y, por último, variable de
+entorno explícita. Si se define una de las variables operativas, el campo
+correspondiente aparece bloqueado en el panel. Los límites validados son:
+timeout de respuesta 5–120 s, timeout de combinación 5–60 s, máximo 2–4
+números, 1–10 intentos e intervalo de sondeo 0.5–10 s.
 
 ## CLI: probar un celular
 
@@ -117,7 +130,8 @@ Antes de cada acción se envía `KEYCODE_WAKEUP` y se configura
 El servidor activa automáticamente **Altavoz** cuando detecta una transición a
 `ACTIVE`. Primero verifica que la ruta no sea ya `TYPE_SPEAKER` y después busca
 el control accesible de One UI etiquetado `Speaker`/`Altavoz`; no utiliza
-coordenadas fijas. Puede deshabilitarse iniciando con `AUTO_SPEAKER=false`.
+coordenadas fijas. Puede deshabilitarse desde el panel. Definir
+`AUTO_SPEAKER=false` lo deshabilita y bloquea ese campo.
 
 ### Agregar y combinar llamadas
 
@@ -184,14 +198,31 @@ El endpoint inicia una tarea en segundo plano y responde inmediatamente:
 curl -X POST http://127.0.0.1:8000/conference-all
 ```
 
-El flujo consume hasta `MAX_CONFERENCE_CALLS` números pendientes: llama al
+El flujo consume hasta el máximo configurado de números pendientes: llama al
 primero, espera `ACTIVE`, agrega el siguiente, espera que conecte y que se
 combine, y continúa. La tarjeta muestra `conference_state`, progreso y error.
 Los números que excedan el máximo permanecen pendientes. **Colgar** cancela la
-tarea y continúa disponible como parada de emergencia.
+tarea antes de enviar `KEYCODE_ENDCALL`, por lo que no se marca el siguiente
+número. **Colgar todos** aplica la misma cancelación a cada dispositivo.
+
+Si un número no contesta durante el timeout, rechaza o falla, se termina ese
+intento, se registra el resultado y se continúa con el siguiente cuando
+**Omitir fallidos y continuar** está activo. La aplicación no vuelve a marcar
+automáticamente un intento cuyo estado quedó incierto.
 
 Estados posibles: `STARTING`, `WAITING_ACTIVE`, `ADDING`, `MERGING`, `ACTIVE`,
-`FAILED`, `CANCELLED` y `ENDED`.
+`FAILED`, `CANCELLED`, `ENDED`, `WAITING_DEVICE` y `RECOVERED_PAUSED`.
+
+### Recuperación después de reiniciar o desconectar
+
+La cola, la sesión y el estado de cada participante se guardan en SQLite. Un
+reinicio no reanuda llamadas sin supervisión: la sesión aparece como
+`RECOVERED_PAUSED` y ofrece **Reanudar conferencia** y **Cancelar sesión
+recuperada**. Una desconexión usa `WAITING_DEVICE` y pasa a pausa al reconectar.
+
+Antes de reanudar, compruebe físicamente la pantalla del teléfono. Las acciones
+que ya estaban en `DIALING` o `ACTIVE` cuando se interrumpió el proceso no se
+repiten; solo continúan los participantes que seguían en `PENDING`.
 
 ### Tiempos de Altavoz y combinación
 
@@ -222,11 +253,9 @@ aproximadamente 9.5–13 segundos. Los logs ahora registran por separado el tiem
 de Altavoz, el tiempo de la orden de combinación y el tiempo desde que el
 servidor detecta `ACTIVE`.
 
-Para priorizar rapidez con uno o dos dispositivos puede probarse:
-
-```bash
-POLL_INTERVAL=1 python3 api.py
-```
+Para priorizar rapidez con uno o dos dispositivos puede probarse un intervalo
+de 1 segundo desde el panel. También puede fijarse con
+`POLL_INTERVAL=1 python3 api.py`; en ese caso quedará bloqueado en la UI.
 
 Un intervalo menor aumenta la cantidad de procesos ADB y la carga del hub/PC.
 Mantenga `2.5` al controlar muchos dispositivos o si aparecen estados `offline`.
@@ -250,9 +279,9 @@ Abra <http://127.0.0.1:8000>. Para probar dos teléfonos:
 6. Desconecte uno: en unos 2–3 segundos debe verse como desconectado, sin
    interrumpir el otro.
 
-Los números adicionales permanecen en memoria. Cada nueva pulsación de
+Los números adicionales permanecen en la cola SQLite. Cada nueva pulsación de
 **Llamar a todos** consume el siguiente de cada celular. Reiniciar el servidor
-vacía esa cola; el historial de llamadas sí permanece en SQLite.
+conserva esa cola y pausa cualquier conferencia que estuviera en curso.
 
 Los campos de llamada aceptan únicamente entre 3 y 20 dígitos, con `+` opcional
 al inicio. Conservan su texto y foco durante las actualizaciones HTMX de las
@@ -263,6 +292,7 @@ tarjetas.
 ```bash
 curl http://127.0.0.1:8000/devices
 curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/settings
 
 curl -X POST http://127.0.0.1:8000/devices/SERIAL/call \
   -H 'Content-Type: application/json' -d '{"number":"8095550101"}'
@@ -272,6 +302,13 @@ curl -X POST http://127.0.0.1:8000/call-all \
   -d '{"assignments":{"SERIAL_A":"8095550101","SERIAL_B":"8095550102"}}'
 
 curl -X POST http://127.0.0.1:8000/hangup-all
+
+curl -X PATCH http://127.0.0.1:8000/settings \
+  -H 'Content-Type: application/json' \
+  -d '{"conference_call_timeout":20,"auto_speaker":true}'
+
+curl -X POST http://127.0.0.1:8000/devices/SERIAL/conference/resume
+curl -X POST http://127.0.0.1:8000/devices/SERIAL/conference/cancel
 
 curl -F 'numbers=8095550101
 8095550102' -F 'target_serial=' http://127.0.0.1:8000/numbers
@@ -297,6 +334,9 @@ sigue siendo una respuesta válida del proceso:
 - `dumpsys telephony.registry` (`mCallState`) se usa como respaldo.
 - `calls` guarda serial, número, inicio, fin, resultado y error.
 - `devices` guarda el último modelo, estado ADB y versión Android observados.
+- `app_settings` y `settings_audit` guardan ajustes y su historial de cambios.
+- `number_queue`, `conference_sessions` y `conference_participants` permiten
+  recuperar colas y sesiones sin repetir intentos inciertos.
 - `logs/SERIAL.log` contiene el log independiente de cada celular.
 
 ## Pruebas automáticas
@@ -309,8 +349,9 @@ pytest -q
 ```
 
 La suite incluye regresiones para impedir que el historial de `dumpsys telecom`
-simule una llamada activa, conservar campos durante refrescos HTMX y rechazar
-letras en números telefónicos.
+simule una llamada activa, conservar campos durante refrescos HTMX, rechazar
+letras en números telefónicos, persistir ajustes y colas, cancelar antes del
+siguiente número, omitir números sin respuesta y recuperar sesiones pausadas.
 
 ## Logs HTTP y rutas inexistentes
 
@@ -403,5 +444,7 @@ necesitan esperas y selectores más complejos.
 - [ ] Dos celulares llaman en paralelo y conservan logs separados.
 - [ ] Un fallo o desconexión no detiene el otro celular.
 - [ ] **Colgar todos** funciona como parada de emergencia.
+- [ ] Un número sin respuesta se omite después del timeout y continúa el siguiente.
+- [ ] Reiniciar durante una conferencia muestra `RECOVERED_PAUSED` sin repetir el número incierto.
 - [ ] `adb_caller.db` contiene filas en `devices` y `calls` con inicio/fin.
 - [ ] `pytest -q` finaliza sin errores.

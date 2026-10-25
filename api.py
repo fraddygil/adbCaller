@@ -8,6 +8,7 @@ import json
 import re
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 from urllib.parse import quote
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -18,10 +19,24 @@ from call_controller import CallController
 from config import BASE_DIR, settings
 from db import Database
 from device_manager import DeviceManager, DeviceUnavailableError
-from models import AdbState, CallAllRequest, CallRequest
+from models import AdbState, CallAllRequest, CallRequest, ConferenceState
+from runtime_settings import RuntimeSettings
 
 
 database = Database(settings.database_path)
+runtime_settings = RuntimeSettings(
+    database,
+    {
+        "poll_interval": settings.poll_interval,
+        "auto_speaker": settings.auto_speaker,
+        "auto_merge": settings.auto_merge,
+        "conference_call_timeout": settings.conference_call_timeout,
+        "conference_merge_timeout": settings.conference_merge_timeout,
+        "max_conference_calls": settings.max_conference_calls,
+        "merge_attempts": settings.merge_attempts,
+        "skip_failed_numbers": settings.skip_failed_numbers,
+    },
+)
 adb = AdbClient(settings.adb_path, settings.adb_timeout)
 controller = CallController(adb, database, auto_speaker=settings.auto_speaker)
 manager = DeviceManager(
@@ -33,18 +48,22 @@ manager = DeviceManager(
     conference_call_timeout=settings.conference_call_timeout,
     conference_merge_timeout=settings.conference_merge_timeout,
     max_conference_calls=settings.max_conference_calls,
+    merge_attempts=settings.merge_attempts,
+    skip_failed_numbers=settings.skip_failed_numbers,
 )
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await database.initialize()
+    await runtime_settings.initialize()
+    manager.apply_settings(runtime_settings.values)
     await manager.start()
     yield
     await manager.stop()
 
 
-app = FastAPI(title="ADB Caller", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="ADB Caller", version="0.3.0", lifespan=lifespan)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -66,6 +85,21 @@ async def health():
         for snapshot in snapshots
     )
     return {"status": "ok", "available_devices": available}
+
+
+@app.get("/settings")
+async def get_settings():
+    return {"settings": runtime_settings.describe(), "recovery_policy": "pause"}
+
+
+@app.patch("/settings")
+async def update_settings(updates: dict[str, Any]):
+    try:
+        await runtime_settings.update(updates)
+        manager.apply_settings(runtime_settings.values)
+        return {"settings": runtime_settings.describe()}
+    except Exception as exc:
+        raise _http_error(exc) from exc
 
 
 @app.post("/devices/{serial}/call")
@@ -149,6 +183,23 @@ async def start_all_conferences():
         raise _http_error(exc) from exc
 
 
+@app.post("/devices/{serial}/conference/resume")
+async def resume_device_conference(serial: str):
+    try:
+        return {"serial": serial, "pending": await manager.resume_conference(serial)}
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@app.post("/devices/{serial}/conference/cancel")
+async def cancel_device_conference(serial: str):
+    try:
+        await manager.cancel_recovered_conference(serial)
+        return {"serial": serial, "state": ConferenceState.CANCELLED}
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @app.get("/events")
 async def events() -> StreamingResponse:
     queue = manager.subscribe()
@@ -185,7 +236,7 @@ async def upload_numbers(
             if len(content) > 1_000_000:
                 raise ValueError("El CSV no puede superar 1 MB")
             parsed.extend(_parse_csv_numbers(content.decode("utf-8-sig")))
-        assigned = manager.assign_numbers(parsed, target_serial or None)
+        assigned = await manager.assign_numbers(parsed, target_serial or None)
         return {"assignments": assigned}
     except (UnicodeDecodeError, csv.Error) as exc:
         raise HTTPException(400, "CSV inválido; use UTF-8") from exc
@@ -224,7 +275,7 @@ async def ui_upload_numbers(
             if len(content) > 1_000_000:
                 raise ValueError("El CSV no puede superar 1 MB")
             parsed.extend(_parse_csv_numbers(content.decode("utf-8-sig")))
-        assigned = manager.assign_numbers(parsed, target_serial or None)
+        assigned = await manager.assign_numbers(parsed, target_serial or None)
         details = ", ".join(f"{html.escape(k)}: {len(v)}" for k, v in assigned.items())
         return (
             f'<span class="success">Asignados — {details}. '
@@ -256,7 +307,7 @@ async def ui_hangup_device(serial: str) -> str:
 async def ui_add_call_device(serial: str, number: str = Form()) -> str:
     try:
         state = await manager.add_call(serial, number)
-        suffix = "; se combinará al conectar" if settings.auto_merge else ""
+        suffix = "; se combinará al conectar" if manager.auto_merge else ""
         return f'<span class="success">Llamada agregada: {state.value}{suffix}</span>'
     except Exception as exc:
         return f'<span class="error">{html.escape(str(exc))}</span>'
@@ -317,6 +368,88 @@ async def ui_start_all_conferences() -> str:
         return f'<span class="error">{html.escape(str(exc))}</span>'
 
 
+@app.get("/ui/settings", response_class=HTMLResponse)
+async def ui_settings() -> str:
+    fields: list[str] = []
+    for item in runtime_settings.describe():
+        disabled = " disabled" if item["locked"] else ""
+        locked = " (bloqueado por entorno)" if item["locked"] else ""
+        if item["kind"] == "bool":
+            checked = " checked" if item["value"] else ""
+            control = (
+                f'<input type="checkbox" name="{item["key"]}" value="true"'
+                f"{checked}{disabled}>"
+            )
+        else:
+            minimum = f' min="{item["minimum"]}"' if item["minimum"] is not None else ""
+            maximum = f' max="{item["maximum"]}"' if item["maximum"] is not None else ""
+            step = ' step="0.5"' if item["kind"] == "float" else ""
+            control = (
+                f'<input type="number" name="{item["key"]}" value="{item["value"]}"'
+                f"{minimum}{maximum}{step}{disabled}>"
+            )
+        fields.append(f'<label>{html.escape(item["label"] + locked)}{control}</label>')
+    return (
+        '<p>Recuperación tras reinicio: pausa segura con confirmación manual.</p>'
+        '<form hx-post="/ui/settings" hx-target="#settings-result">'
+        + "".join(fields)
+        + '<button type="submit">Guardar ajustes</button></form>'
+        + '<div id="settings-result" class="result" aria-live="polite"></div>'
+    )
+
+
+@app.post("/ui/settings", response_class=HTMLResponse)
+async def ui_update_settings(
+    poll_interval: float | None = Form(default=None),
+    conference_call_timeout: float | None = Form(default=None),
+    conference_merge_timeout: float | None = Form(default=None),
+    max_conference_calls: int | None = Form(default=None),
+    merge_attempts: int | None = Form(default=None),
+    auto_speaker: str | None = Form(default=None),
+    auto_merge: str | None = Form(default=None),
+    skip_failed_numbers: str | None = Form(default=None),
+) -> str:
+    submitted = {
+        "poll_interval": poll_interval,
+        "conference_call_timeout": conference_call_timeout,
+        "conference_merge_timeout": conference_merge_timeout,
+        "max_conference_calls": max_conference_calls,
+        "merge_attempts": merge_attempts,
+        "auto_speaker": auto_speaker is not None,
+        "auto_merge": auto_merge is not None,
+        "skip_failed_numbers": skip_failed_numbers is not None,
+    }
+    updates = {
+        key: value
+        for key, value in submitted.items()
+        if key not in runtime_settings.locked and value is not None
+    }
+    try:
+        await runtime_settings.update(updates)
+        manager.apply_settings(runtime_settings.values)
+        return '<span class="success">Ajustes guardados y aplicados</span>'
+    except Exception as exc:
+        return f'<span class="error">{html.escape(str(exc))}</span>'
+
+
+@app.post("/ui/devices/{serial}/resume", response_class=HTMLResponse)
+async def ui_resume_conference(serial: str) -> str:
+    try:
+        total = await manager.resume_conference(serial)
+        return f'<span class="success">Sesión reanudada con {total} pendientes</span>'
+    except Exception as exc:
+        return f'<span class="error">{html.escape(str(exc))}</span>'
+
+
+@app.post("/ui/devices/{serial}/cancel-recovered", response_class=HTMLResponse)
+async def ui_cancel_recovered_conference(serial: str) -> str:
+    try:
+        await manager.cancel_recovered_conference(serial)
+        return '<span class="success">Sesión recuperada cancelada</span>'
+    except Exception as exc:
+        return f'<span class="error">{html.escape(str(exc))}</span>'
+
+
 def _parse_text_numbers(value: str) -> list[str]:
     return [item.strip() for item in re.split(r"[,;\r\n]+", value) if item.strip()]
 
@@ -343,6 +476,11 @@ def _device_card(snapshot) -> str:
     availability = snapshot.adb_state.value if snapshot.connected else "disconnected"
     disabled = "" if snapshot.connected and snapshot.adb_state is AdbState.DEVICE else " disabled"
     version = html.escape(snapshot.android_version or "sin leer")
+    recovery_controls = ""
+    if snapshot.conference_state.value == "RECOVERED_PAUSED":
+        recovery_controls = f"""
+        <button type="button" hx-post="/ui/devices/{serial_path}/resume" hx-target="#result-{dom_id}"{disabled}>Reanudar conferencia</button>
+        <button type="button" class="danger" hx-post="/ui/devices/{serial_path}/cancel-recovered" hx-target="#result-{dom_id}">Cancelar sesión recuperada</button>"""
     return f"""
     <article class="device-card">
       <div class="card-head"><h3>{model}</h3><span class="status {state_class}">{snapshot.call_state.value}</span></div>
@@ -357,6 +495,7 @@ def _device_card(snapshot) -> str:
         <button type="button" hx-get="/ui/devices/{serial_path}/calls" hx-target="#result-{dom_id}"{disabled}>Ver llamadas</button>
         <button type="button" hx-post="/ui/devices/{serial_path}/merge" hx-target="#result-{dom_id}"{disabled}>Combinar</button>
         <button type="button" hx-post="/ui/devices/{serial_path}/speaker" hx-target="#result-{dom_id}"{disabled}>Activar altavoz</button>
+        {recovery_controls}
         <button type="button" class="danger" hx-post="/ui/devices/{serial_path}/hangup" hx-target="#result-{dom_id}"{disabled}>Colgar</button>
       </form>
       <div id="result-{dom_id}" class="result" aria-live="polite"></div>

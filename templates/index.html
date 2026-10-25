@@ -35,6 +35,11 @@
   <h1>ADB Caller</h1>
 
   <section class="panel">
+    <h2>Ajustes operativos</h2>
+    <div hx-get="/ui/settings" hx-trigger="load" hx-swap="innerHTML">Cargando ajustes…</div>
+  </section>
+
+  <section class="panel">
     <h2>Cargar números</h2>
     <form hx-post="/ui/numbers" hx-target="#global-result" hx-encoding="multipart/form-data">
       <label style="flex-basis:100%">Pegar números (uno por línea)

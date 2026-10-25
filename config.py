@@ -28,9 +28,11 @@ class Settings:
     port: int = int(os.getenv("PORT", "8000"))
     auto_speaker: bool = env_bool("AUTO_SPEAKER", True)
     auto_merge: bool = env_bool("AUTO_MERGE", True)
-    conference_call_timeout: float = float(os.getenv("CONFERENCE_CALL_TIMEOUT", "60"))
+    conference_call_timeout: float = float(os.getenv("CONFERENCE_CALL_TIMEOUT", "15"))
     conference_merge_timeout: float = float(os.getenv("CONFERENCE_MERGE_TIMEOUT", "30"))
     max_conference_calls: int = int(os.getenv("MAX_CONFERENCE_CALLS", "4"))
+    merge_attempts: int = int(os.getenv("MERGE_ATTEMPTS", "5"))
+    skip_failed_numbers: bool = env_bool("SKIP_FAILED_NUMBERS", True)
 
 
 settings = Settings()

@@ -1,8 +1,8 @@
 import asyncio
 from pathlib import Path
 
-from api import _device_card, health
-from models import AdbState, DeviceSnapshot
+from api import _device_card, health, ui_settings
+from models import AdbState, ConferenceState, DeviceSnapshot
 
 
 def test_device_number_input_is_preserved_during_refresh() -> None:
@@ -34,3 +34,22 @@ def test_global_buttons_distinguish_single_calls_from_conferences() -> None:
     assert "Iniciar conferencias con pendientes" in page
     assert 'hx-post="/ui/conference-all"' in page
     assert "Llamar 1 por celular" in page
+
+
+def test_settings_panel_contains_operational_controls() -> None:
+    panel = asyncio.run(ui_settings())
+
+    assert 'name="conference_call_timeout"' in panel
+    assert 'name="max_conference_calls"' in panel
+    assert 'name="auto_speaker"' in panel
+    assert 'hx-post="/ui/settings"' in panel
+
+
+def test_recovered_conference_has_resume_and_cancel_controls() -> None:
+    snapshot = DeviceSnapshot("SERIAL-1", "SM-A566E", AdbState.DEVICE)
+    snapshot.conference_state = ConferenceState.RECOVERED_PAUSED
+
+    card = _device_card(snapshot)
+
+    assert f'/ui/devices/{snapshot.serial}/resume' in card
+    assert f'/ui/devices/{snapshot.serial}/cancel-recovered' in card

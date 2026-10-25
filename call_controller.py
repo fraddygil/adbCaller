@@ -139,6 +139,13 @@ class CallController:
         get_device_logger(serial).info("Llamada colgada")
         return CallState.IDLE
 
+    async def end_failed_attempt(self, serial: str, result: str) -> None:
+        await self.adb.ensure_awake(serial)
+        await self.adb.shell(serial, "input", "keyevent", "KEYCODE_ENDCALL")
+        if self.database:
+            await self.database.finish_open_call(serial, result)
+        get_device_logger(serial).info("Intento de llamada terminado: %s", result)
+
     async def answer(self, serial: str) -> CallState:
         await self.adb.ensure_awake(serial)
         await self.adb.shell(serial, "input", "keyevent", "KEYCODE_CALL")
