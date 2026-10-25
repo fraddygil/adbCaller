@@ -1,7 +1,7 @@
 import asyncio
 from pathlib import Path
 
-from api import _device_card, health, ui_settings
+from api import _device_card, _should_show_device, health, ui_settings
 from models import AdbState, ConferenceState, DeviceSnapshot
 
 
@@ -53,3 +53,17 @@ def test_recovered_conference_has_resume_and_cancel_controls() -> None:
 
     assert f'/ui/devices/{snapshot.serial}/resume' in card
     assert f'/ui/devices/{snapshot.serial}/cancel-recovered' in card
+
+
+def test_disconnected_device_is_only_shown_when_it_has_recoverable_work() -> None:
+    snapshot = DeviceSnapshot("SERIAL-1", "SM-A566E", AdbState.OFFLINE)
+    snapshot.connected = False
+
+    assert _should_show_device(snapshot) is False
+
+    snapshot.pending_numbers = 1
+    assert _should_show_device(snapshot) is True
+
+    snapshot.pending_numbers = 0
+    snapshot.conference_state = ConferenceState.RECOVERED_PAUSED
+    assert _should_show_device(snapshot) is True

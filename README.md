@@ -276,8 +276,9 @@ Abra <http://127.0.0.1:8000>. Para probar dos teléfonos:
 3. Pegue al menos dos números, elija reparto automático y pulse **Asignar**.
 4. Pulse **Llamar a todos**: se consume un número pendiente por celular.
 5. Verifique estados independientes y pulse **Colgar todos**.
-6. Desconecte uno: en unos 2–3 segundos debe verse como desconectado, sin
-   interrumpir el otro.
+6. Desconecte uno: su tarjeta desaparece si no tiene trabajo pendiente, sin
+   interrumpir el otro. Si conserva números o una sesión recuperable, permanece
+   visible como desconectado hasta que se resuelva o vuelva a conectarse.
 
 Los números adicionales permanecen en la cola SQLite. Cada nueva pulsación de
 **Llamar a todos** consume el siguiente de cada celular. Reiniciar el servidor

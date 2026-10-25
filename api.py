@@ -246,7 +246,7 @@ async def upload_numbers(
 
 @app.get("/ui/devices", response_class=HTMLResponse)
 async def ui_devices() -> str:
-    snapshots = manager.snapshots()
+    snapshots = [snapshot for snapshot in manager.snapshots() if _should_show_device(snapshot)]
     if not snapshots:
         return '<p class="empty">No hay celulares detectados.</p>'
     return "".join(_device_card(snapshot) for snapshot in snapshots)
@@ -500,6 +500,15 @@ def _device_card(snapshot) -> str:
       </form>
       <div id="result-{dom_id}" class="result" aria-live="polite"></div>
     </article>"""
+
+
+def _should_show_device(snapshot) -> bool:
+    return (
+        snapshot.connected
+        or snapshot.pending_numbers > 0
+        or snapshot.conference_state
+        in {ConferenceState.RECOVERED_PAUSED, ConferenceState.WAITING_DEVICE}
+    )
 
 
 def _results_html(results: dict) -> str:
