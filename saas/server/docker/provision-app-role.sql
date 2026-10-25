@@ -1,0 +1,19 @@
+SELECT format('CREATE ROLE adbcaller_app LOGIN PASSWORD %L', :'app_password')
+WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'adbcaller_app')
+\gexec
+
+SELECT format('ALTER ROLE adbcaller_app PASSWORD %L', :'app_password')
+\gexec
+
+ALTER ROLE adbcaller_app
+    NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+GRANT CONNECT ON DATABASE adbcaller TO adbcaller_app;
+GRANT USAGE ON SCHEMA public TO adbcaller_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO adbcaller_app;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO adbcaller_app;
+REVOKE INSERT, UPDATE, DELETE ON tenants FROM adbcaller_app;
+REVOKE ALL ON alembic_version FROM adbcaller_app;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO adbcaller_app;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+    GRANT USAGE, SELECT ON SEQUENCES TO adbcaller_app;

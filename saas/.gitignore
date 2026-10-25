@@ -1,0 +1,14 @@
+.env
+*.db
+*.db-shm
+*.db-wal
+*.log
+*.egg-info/
+build/
+dist/
+agent/build/
+agent/dist/
+agent/secrets/
+__pycache__/
+.pytest_cache/
+*.py[cod]

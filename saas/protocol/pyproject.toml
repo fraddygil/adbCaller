@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "adbcaller-protocol"
+version = "0.1.0"
+description = "Protocolo versionado entre ADB Caller SaaS y sus agentes"
+requires-python = ">=3.11"
+dependencies = ["pydantic>=2.10,<3"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["adbcaller_protocol*"]

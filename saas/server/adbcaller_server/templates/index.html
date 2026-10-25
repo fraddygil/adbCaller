@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ADB Caller SaaS</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+    body { max-width: 1100px; margin: 0 auto; padding: 1rem; }
+    header, .row { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; }
+    header { justify-content: space-between; }
+    section, article { border: 1px solid #8886; border-radius: .6rem; padding: 1rem; margin: 1rem 0; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; }
+    input, select, button { font: inherit; padding: .55rem; }
+    input { min-width: 12rem; }
+    button { cursor: pointer; }
+    .danger { background: #a22; color: white; }
+    .ok { color: #198754; } .error { color: #dc3545; white-space: pre-wrap; }
+    .muted { opacity: .72; } [hidden] { display: none !important; }
+    code { overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+  <header><h1>ADB Caller SaaS</h1><button id="logout" hidden>Cerrar sesión</button></header>
+  <p id="message" class="muted" role="status"></p>
+
+  <section id="login-panel">
+    <h2>Iniciar sesión</h2>
+    <form id="login-form" class="row">
+      <input id="tenant-slug" placeholder="Tenant" required pattern="[a-z0-9-]+" autocomplete="organization">
+      <input id="email" type="email" placeholder="Email" required autocomplete="username">
+      <input id="password" type="password" placeholder="Contraseña" required autocomplete="current-password">
+      <button>Entrar</button>
+    </form>
+  </section>
+
+  <main id="dashboard" hidden>
+    <section>
+      <div class="row"><h2>Agentes</h2><button id="pairing">Nuevo código de pairing</button></div>
+      <p id="pairing-result"></p><div id="agents" class="grid"></div>
+    </section>
+    <section>
+      <div class="row"><h2>Dispositivos</h2><button id="refresh">Actualizar</button><button id="hangup-all" class="danger">Colgar todos los dispositivos</button></div>
+      <div id="devices" class="grid"></div>
+    </section>
+    <section>
+      <h2>Listas de números</h2>
+      <form id="list-form">
+        <div class="row"><input id="list-name" placeholder="Nombre de la lista" required><button>Guardar lista</button></div>
+        <textarea id="list-numbers" rows="5" style="width:100%" placeholder="Un número por línea" required></textarea>
+      </form>
+      <form id="csv-form" class="row">
+        <input id="csv-name" placeholder="Nombre del CSV" required>
+        <input id="csv-file" type="file" accept=".csv,text/csv" required>
+        <button>Subir CSV</button>
+      </form>
+      <div id="number-lists" class="grid"></div>
+    </section>
+    <section>
+      <h2>Conferencias</h2>
+      <div id="conferences" class="grid"></div>
+    </section>
+    <section id="users-section">
+      <h2>Usuarios</h2>
+      <form id="user-form" class="row">
+        <input id="new-user-email" type="email" placeholder="Email" required>
+        <input id="new-user-password" type="password" minlength="12" placeholder="Contraseña inicial" required>
+        <select id="new-user-role"><option>OPERATOR</option><option>ADMIN</option></select>
+        <button>Crear usuario</button>
+      </form>
+      <div id="users"></div>
+    </section>
+    <section id="settings-section">
+      <h2>Ajustes de automatización</h2>
+      <form id="settings-form" class="row">
+        <label><input id="auto-speaker" type="checkbox"> Altavoz automático</label>
+        <label>Timeout ACTIVE <input id="call-timeout" type="number" min="10" max="300"></label>
+        <label>Intentos Combinar <input id="merge-attempts" type="number" min="1" max="10"></label>
+        <label>Máximo conferencia <input id="max-conference" type="number" min="2" max="20"></label>
+        <button>Guardar ajustes</button>
+      </form>
+    </section>
+    <section>
+      <h2>Última tarea</h2><pre id="task">Ninguna</pre>
+    </section>
+    <section>
+      <h2>Historial de llamadas</h2><div id="calls"></div>
+    </section>
+    <section id="audit-section">
+      <h2>Auditoría</h2><div id="audit"></div>
+    </section>
+  </main>
+
+  <script>
+    let csrf = "";
+    let isAdmin = false;
+    let eventSource = null;
+    const $ = (id) => document.getElementById(id);
+    const message = (text, error=false) => { $("message").textContent=text; $("message").className=error?"error":"muted"; };
+    async function api(path, options={}) {
+      const headers = {"Content-Type":"application/json", ...(options.headers||{})};
+      if (options.method && options.method !== "GET") headers["X-CSRF-Token"] = csrf;
+      const response = await fetch(path, {...options, headers});
+      if (!response.ok) { let detail=response.statusText; try { detail=(await response.json()).detail||detail; } catch {} throw new Error(detail); }
+      return response.status === 204 ? null : response.json();
+    }
+    function showDashboard(me) {
+      csrf=me.csrf_token; isAdmin=me.role==="ADMIN"; $("login-panel").hidden=true; $("dashboard").hidden=false; $("logout").hidden=false;
+      $("users-section").hidden=me.role!=="ADMIN"; $("audit-section").hidden=me.role!=="ADMIN"; $("pairing").hidden=me.role!=="ADMIN";
+      connectEvents(); refreshAll();
+    }
+    async function restoreSession() { try { showDashboard(await api("/auth/me")); } catch {} }
+    $("login-form").addEventListener("submit", async (event) => { event.preventDefault(); try {
+      const me=await api("/auth/login",{method:"POST",body:JSON.stringify({tenant_slug:$("tenant-slug").value,email:$("email").value,password:$("password").value})});
+      $("password").value=""; showDashboard(me); message("Sesión iniciada");
+    } catch(error) { message(error.message,true); }});
+    $("logout").addEventListener("click", async()=>{ try { await api("/auth/logout",{method:"POST",body:"{}"}); } finally { location.reload(); }});
+    $("refresh").addEventListener("click", refreshAll);
+    $("hangup-all").addEventListener("click",async()=>{if(!confirm("¿Colgar todas las llamadas y cancelar conferencias?"))return;try{const tasks=await api("/hangup-all",{method:"POST",body:"{}"});$("task").textContent=JSON.stringify(tasks,null,2);tasks.forEach(task=>watchTask(task.id));}catch(error){message(error.message,true);}});
+    $("pairing").addEventListener("click", async()=>{ try { const value=await api("/admin/pairing-codes",{method:"POST",body:"{}"}); $("pairing-result").innerHTML=`Código (una sola vez): <code>${escapeHtml(value.code)}</code>`; } catch(error){message(error.message,true);} });
+    $("user-form").addEventListener("submit",async(event)=>{event.preventDefault();try{await api("/admin/users",{method:"POST",body:JSON.stringify({email:$("new-user-email").value,password:$("new-user-password").value,role:$("new-user-role").value})});event.target.reset();await loadUsers();}catch(error){message(error.message,true);}});
+    $("settings-form").addEventListener("submit",async(event)=>{event.preventDefault();try{await api("/settings",{method:"PUT",body:JSON.stringify({auto_speaker:$("auto-speaker").checked,conference_call_timeout_seconds:Number($("call-timeout").value),conference_merge_attempts:Number($("merge-attempts").value),max_conference_calls:Number($("max-conference").value)})});message("Ajustes guardados");}catch(error){message(error.message,true);}});
+    $("list-form").addEventListener("submit",async(event)=>{event.preventDefault();try{const numbers=$("list-numbers").value.split(/[,;\r\n]+/).map(v=>v.trim()).filter(Boolean);await api("/number-lists",{method:"POST",body:JSON.stringify({name:$("list-name").value,numbers})});event.target.reset();await loadNumberLists();}catch(error){message(error.message,true);}});
+    $("csv-form").addEventListener("submit",async(event)=>{event.preventDefault();try{const form=new FormData();form.append("name",$("csv-name").value);form.append("csv_file",$("csv-file").files[0]);const response=await fetch("/number-lists/upload",{method:"POST",headers:{"X-CSRF-Token":csrf},body:form});if(!response.ok){const value=await response.json();throw new Error(value.detail||response.statusText);}event.target.reset();await loadNumberLists();}catch(error){message(error.message,true);}});
+    async function refreshAll(){ await Promise.allSettled([loadAgents(),loadDevices(),loadUsers(),loadNumberLists(),loadConferences(),loadCalls(),loadAudit(),loadSettings()]); }
+    async function loadAgents(){ try { const values=await api("/admin/agents"); $("agents").innerHTML=values.map(a=>`<article><h3>${escapeHtml(a.name)}</h3><p>${a.status} · ${escapeHtml(a.platform)}</p>${a.status!=="REVOKED"?`<button class="danger" onclick="revokeAgent('${a.id}')">Revocar</button>`:""}</article>`).join("")||"<p>No hay agentes.</p>"; } catch(error){ if(error.message!=="Se requiere rol administrador") message(error.message,true); } }
+    async function loadUsers(){ if($("users-section").hidden)return; try { const values=await api("/admin/users"); $("users").innerHTML=values.map(u=>`<p>${escapeHtml(u.email)} · ${u.role} · ${u.active?"activo":"inactivo"}</p>`).join(""); } catch(error){message(error.message,true);} }
+    async function loadDevices(){ try { const active=document.activeElement?.id; const saved={}; document.querySelectorAll("[data-preserve]").forEach(el=>saved[el.id]=el.value); const values=await api("/devices"); $("devices").innerHTML=values.map(deviceCard).join("")||"<p>No hay dispositivos.</p>"; Object.entries(saved).forEach(([id,value])=>{if($(id))$(id).value=value;}); if(active&&$(active))$(active).focus(); } catch(error){message(error.message,true);} }
+    async function loadNumberLists(){try{const values=await api("/number-lists");$("number-lists").innerHTML=values.map(v=>`<article><h3>${escapeHtml(v.name)}</h3><p>${v.pending} pendientes de ${v.total}</p><div class="row"><button onclick="callAll('${v.id}')" ${v.pending?"":"disabled"}>Llamar en todos los dispositivos</button><button onclick="conferenceAll('${v.id}')" ${v.pending>1?"":"disabled"}>Iniciar conferencias en todos</button></div></article>`).join("")||"<p>No hay listas.</p>";}catch(error){message(error.message,true);}}
+    async function loadConferences(){try{const values=await api("/conferences");$("conferences").innerHTML=values.map(v=>`<article><h3>${v.state}</h3><p>Progreso: ${v.progress}/${v.total}</p>${v.error?`<p class="error">${escapeHtml(v.error)}</p>`:""}<div class="row">${["QUEUED","RUNNING","PAUSED","ACTIVE"].includes(v.state)?`<button class="danger" onclick="conferenceAction('${v.id}','cancel')">Cancelar</button>`:""}${v.state==="PAUSED"?`<button onclick="conferenceAction('${v.id}','resume')">Reanudar</button>`:""}</div></article>`).join("")||"<p>No hay conferencias.</p>";}catch(error){message(error.message,true);}}
+    async function loadCalls(){try{const values=await api("/calls?limit=30");$("calls").innerHTML=values.map(v=>`<p><code>${escapeHtml(v.number)}</code> · ${v.state} · ${v.result}</p>`).join("")||"<p>No hay llamadas.</p>";}catch(error){message(error.message,true);}}
+    async function loadAudit(){if($("audit-section").hidden)return;try{const values=await api("/audit?limit=30");$("audit").innerHTML=values.map(v=>`<p>${escapeHtml(v.action)} · ${escapeHtml(v.outcome)} · ${escapeHtml(v.created_at)}</p>`).join("")||"<p>Sin eventos.</p>";}catch(error){message(error.message,true);}}
+    async function loadSettings(){try{const value=await api("/settings");$("auto-speaker").checked=value.auto_speaker;$("call-timeout").value=value.conference_call_timeout_seconds;$("merge-attempts").value=value.conference_merge_attempts;$("max-conference").value=value.max_conference_calls;$("settings-form").querySelectorAll("input,button").forEach(el=>el.disabled=!isAdmin);}catch(error){message(error.message,true);}}
+    function deviceCard(d){const disabled=!d.online||d.blocked_by_limit?"disabled":"";return `<article><h3>${escapeHtml(d.model||"Desconocido")}</h3><p>${d.online?"Online":"Offline"} · ADB ${d.adb_state} · llamada <strong>${d.call_state}</strong>${d.blocked_by_limit?" · límite del plan":""}</p><div class="row"><button ${disabled} onclick="command('${d.id}','STATUS')">Estado</button><button ${disabled} onclick="command('${d.id}','ANSWER')">Contestar</button><button ${disabled} onclick="command('${d.id}','HANGUP')">Colgar</button><button ${disabled} onclick="command('${d.id}','ENABLE_SPEAKER')">Altavoz</button><button ${disabled} onclick="command('${d.id}','MERGE')">Combinar</button></div><div class="row"><input data-preserve id="call-${d.id}" inputmode="tel" pattern="\\+?[0-9]{3,20}" placeholder="Número inicial"><button ${disabled} onclick="numberCommand('${d.id}','CALL','call-${d.id}')">Llamar</button></div><div class="row"><input data-preserve id="add-${d.id}" inputmode="tel" pattern="\\+?[0-9]{3,20}" placeholder="Número adicional"><button ${disabled} onclick="numberCommand('${d.id}','ADD_CALL','add-${d.id}')">Agregar llamada</button></div></article>`;}
+    async function command(deviceId,action,parameters={}){try{const task=await api(`/devices/${deviceId}/commands`,{method:"POST",body:JSON.stringify({command:{action,parameters}})});watchTask(task.id);}catch(error){message(error.message,true);}}
+    function numberCommand(deviceId,action,inputId){const input=$(inputId);input.value=input.value.replace(/[^+0-9]/g,"");if(!/^\+?[0-9]{3,20}$/.test(input.value)){message("Número inválido",true);input.focus();return;}command(deviceId,action,{number:input.value});}
+    async function watchTask(id){for(let i=0;i<20;i++){const value=await api(`/tasks/${id}`);$("task").textContent=JSON.stringify(value,null,2);if(["DONE","FAILED","CANCELLED","EXPIRED","UNCERTAIN"].includes(value.state)){refreshAll();return;}await new Promise(resolve=>setTimeout(resolve,1000));}}
+    async function callAll(listId){try{const tasks=await api(`/number-lists/${listId}/call-all`,{method:"POST",body:"{}"});$("task").textContent=JSON.stringify(tasks,null,2);tasks.forEach(task=>watchTask(task.id));}catch(error){message(error.message,true);}}
+    async function conferenceAll(listId){try{const values=await api(`/number-lists/${listId}/conference-all`,{method:"POST",body:"{}"});$("task").textContent=JSON.stringify(values,null,2);await refreshAll();}catch(error){message(error.message,true);}}
+    async function conferenceAction(id,action){try{await api(`/conferences/${id}/${action}`,{method:"POST",body:"{}"});await refreshAll();}catch(error){message(error.message,true);}}
+    async function revokeAgent(id){if(!confirm("¿Revocar este agente?"))return;try{await api(`/admin/agents/${id}/revoke`,{method:"POST",body:"{}"});refreshAll();}catch(error){message(error.message,true);}}
+    function connectEvents(){if(eventSource)return;eventSource=new EventSource("/events");eventSource.addEventListener("update",()=>refreshAll());eventSource.onerror=()=>message("Reconectando eventos…");}
+    function escapeHtml(value){return String(value).replace(/[&<>'"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[c]));}
+    restoreSession();
+  </script>
+</body>
+</html>

@@ -1,0 +1,65 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: adbcaller
+      POSTGRES_USER: adbcaller
+      POSTGRES_PASSWORD: adbcaller
+    ports:
+      - "${POSTGRES_PORT:-54329}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U adbcaller -d adbcaller"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  migrate:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    command: ["alembic", "-c", "alembic.ini", "upgrade", "head"]
+    environment:
+      MIGRATION_DATABASE_URL: postgresql+asyncpg://adbcaller:adbcaller@postgres:5432/adbcaller
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  provision:
+    image: postgres:16-alpine
+    environment:
+      PGPASSWORD: adbcaller
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:-adbcaller_app}
+    command:
+      - sh
+      - -c
+      - >-
+        psql -h postgres -U adbcaller -d adbcaller
+        -v app_password="$${APP_DB_PASSWORD}"
+        -f /provision-app-role.sql
+    volumes:
+      - ./server/docker/provision-app-role.sql:/provision-app-role.sql:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: "no"
+
+  server:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    environment:
+      APP_ENV: development
+      DATABASE_URL: postgresql+asyncpg://adbcaller_app:${APP_DB_PASSWORD:-adbcaller_app}@postgres:5432/adbcaller
+      MIGRATION_DATABASE_URL: postgresql+asyncpg://adbcaller:adbcaller@postgres:5432/adbcaller
+      PUBLIC_URL: http://127.0.0.1:8000
+    ports:
+      - "8000:8000"
+    depends_on:
+      provision:
+        condition: service_completed_successfully
+
+volumes:
+  postgres_data:
